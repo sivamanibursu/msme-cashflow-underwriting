@@ -1,4 +1,4 @@
-# msme-cashflow-underwriting
+# MSME (Micro, Small & Medium Enterprise) Cash-Flow Underwriting
 ## Data Licenses & Attribution
 - **AgamiAI Indian Bank Statements:** Apache 2.0 (`AgamiAI/Indian-Bank-Statements`).
 - **U.S. SBA National Loan Dataset:** Public Domain (`FOIA_7a_FY2020_Present`).

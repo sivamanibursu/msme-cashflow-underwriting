@@ -13,7 +13,7 @@ provider "aws" {
 }
 
 variable "aws_region" {
-  default = "ap-south-1" # Mumbai region
+  default = "ap-southeast-2" # Sydney region
 }
 
 variable "project_prefix" {

@@ -5,7 +5,11 @@ import polars as pl
 
 os.makedirs("data/bronze/sme_hybrid", exist_ok=True)
 
-# 1. Process SBA SME Loan Applications (Real Default Outcomes)
+# 1. Discover bank ledger JSON files first so account mapping matches exact count
+json_files = sorted(glob.glob("data/raw/bank_ledger/train/**/*.json", recursive=True))
+n_accounts = max(len(json_files), 1)
+
+# 2. Process SBA SME Loan Applications (Real Default Outcomes)
 print("Loading SBA SME loan data...")
 sba_raw = pl.read_csv(
     "data/raw/sba/FOIA_7a_FY2020_Present_asof_260930.csv",
@@ -13,20 +17,35 @@ sba_raw = pl.read_csv(
     truncate_ragged_lines=True,
 )
 
+# Normalize column names safely in case SBA CSV uses different casing/spacing
+sba_cols = {c.lower().replace("_", "").replace(" ", ""): c for c in sba_raw.columns}
+status_col = sba_cols.get("loanstatus", "LoanStatus")
+gross_col = sba_cols.get("grossapproval", "GrossApproval")
+naics_col = sba_cols.get("naicscode", "NaicsCode")
+state_col = sba_cols.get("projectstate", "ProjectState")
+date_col = sba_cols.get("approvaldate", "ApprovalDate")
+
 dim_sme = (
-    sba_raw.filter(pl.col("LoanStatus").is_in(["CHGOFF", "PIF"]))
+    sba_raw.filter(pl.col(status_col).cast(pl.Utf8).str.strip_chars().str.to_uppercase().is_in(["CHGOFF", "PIF"]))
     .with_columns(
         pl.arange(1, pl.len() + 1).alias("sme_num"),
-        pl.when(pl.col("LoanStatus") == "CHGOFF").then(1).otherwise(0).alias("default_flag"),
-        pl.col("GrossApproval").cast(pl.Float64, strict=False).alias("requested_loan_usd"),
-        pl.col("NaicsCode").cast(pl.Utf8, strict=False).fill_null("UNKNOWN").alias("naics_industry"),
-        pl.col("ProjectState").cast(pl.Utf8, strict=False).fill_null("NA").alias("region_state"),
-        pl.col("ApprovalDate").str.to_date("%m/%d/%Y", strict=False).alias("application_date"),
+        pl.when(pl.col(status_col).cast(pl.Utf8).str.strip_chars().str.to_uppercase() == "CHGOFF")
+          .then(1)
+          .otherwise(0)
+          .alias("default_flag"),
+        pl.col(gross_col).cast(pl.Utf8).str.replace_all(r"[$,]", "").cast(pl.Float64, strict=False).alias("requested_loan_usd"),
+        pl.col(naics_col).cast(pl.Utf8, strict=False).fill_null("UNKNOWN").alias("naics_industry"),
+        pl.col(state_col).cast(pl.Utf8, strict=False).fill_null("NA").alias("region_state"),
+        pl.coalesce([
+            pl.col(date_col).cast(pl.Utf8).str.strip_chars().str.to_date("%Y-%m-%d", strict=False),
+            pl.col(date_col).cast(pl.Utf8).str.strip_chars().str.to_date("%m/%d/%Y", strict=False),
+            pl.col(date_col).cast(pl.Utf8).str.strip_chars().str.to_date("%d-%b-%Y", strict=False),
+        ]).alias("application_date"),
     )
     .filter(pl.col("application_date").is_not_null() & (pl.col("requested_loan_usd") > 0))
     .with_columns(
         (pl.lit("SME_") + pl.col("sme_num").cast(pl.Utf8).str.zfill(6)).alias("sme_id"),
-        (pl.lit("ACC_") + ((pl.col("sme_num") % 400) + 1).cast(pl.Utf8).str.zfill(4)).alias("bank_account_id"),
+        (pl.lit("ACC_") + ((pl.col("sme_num") % n_accounts) + 1).cast(pl.Utf8).str.zfill(4)).alias("bank_account_id"),
     )
     .select(
         "sme_id",
@@ -42,9 +61,8 @@ dim_sme = (
 dim_sme.write_parquet("data/bronze/sme_hybrid/dim_sme_applications.parquet")
 print(f"Saved dim_sme_applications.parquet: {dim_sme.shape}")
 
-# 2. Process 400 Synthetic Bank Ledger JSON Statements (From train/ only)
-print("Parsing 400 bank ledger JSON files from train/...")
-json_files = sorted(glob.glob("data/raw/bank_ledger/train/**/*.json", recursive=True))
+# 3. Process Synthetic Bank Ledger JSON Statements (From train/ only)
+print(f"Parsing {len(json_files)} bank ledger JSON files from train/...")
 ledger_rows = []
 
 for idx, filepath in enumerate(json_files, start=1):
@@ -93,7 +111,7 @@ fact_ledger = pl.DataFrame(ledger_rows)
 fact_ledger.write_parquet("data/bronze/sme_hybrid/fact_bank_ledger.parquet")
 print(f"Saved fact_bank_ledger.parquet: {fact_ledger.shape}")
 
-# 3. Process Macro Priors
+# 4. Process Macro Priors
 print("Processing macro economic series...")
 fed = pl.read_csv("data/raw/fred/FEDFUNDS.csv", ignore_errors=True)
 drb = pl.read_csv("data/raw/fred/DRBLACBS.csv", ignore_errors=True)
@@ -112,7 +130,7 @@ fact_macro = fed_clean.join(drb_clean, on="macro_date", how="full", coalesce=Tru
 fact_macro.write_parquet("data/bronze/sme_hybrid/fact_macro_priors.parquet")
 print(f"Saved fact_macro_priors.parquet: {fact_macro.shape}")
 
-# 4. Process DataCo Corporate B2B Invoices + Point-in-Time Macro Join
+# 5. Process DataCo Corporate B2B Invoices + Point-in-Time Macro Join
 print("Processing DataCo Corporate B2B invoices...")
 dataco_raw = pl.read_csv(
     "data/raw/dataco/DataCoSupplyChainDataset.csv",
@@ -121,7 +139,7 @@ dataco_raw = pl.read_csv(
 )
 
 sme_lookup = dim_sme.select("sme_id", "application_date").sort("sme_id")
-n_smes = len(sme_lookup)
+n_smes = max(len(sme_lookup), 1)
 
 macro_sorted = (
     fact_macro

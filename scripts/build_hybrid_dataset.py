@@ -99,16 +99,75 @@ fed = pl.read_csv("data/raw/fred/FEDFUNDS.csv", ignore_errors=True)
 drb = pl.read_csv("data/raw/fred/DRBLACBS.csv", ignore_errors=True)
 
 fed_clean = fed.select(
-    pl.col(fed.columns.pop(0)).alias("macro_date"),
-    pl.col(fed.columns.pop(-1)).cast(pl.Float64, strict=False).alias("fed_funds_rate"),
+    pl.col(fed.columns[0]).alias("macro_date"),
+    pl.col(fed.columns[-1]).cast(pl.Float64, strict=False).alias("fed_funds_rate"),
 ).drop_nulls()
 
 drb_clean = drb.select(
-    pl.col(drb.columns.pop(0)).alias("macro_date"),
-    pl.col(drb.columns.pop(-1)).cast(pl.Float64, strict=False).alias("commercial_credit_index"),
+    pl.col(drb.columns[0]).alias("macro_date"),
+    pl.col(drb.columns[-1]).cast(pl.Float64, strict=False).alias("commercial_credit_index"),
 ).drop_nulls()
 
 fact_macro = fed_clean.join(drb_clean, on="macro_date", how="full", coalesce=True).sort("macro_date")
 fact_macro.write_parquet("data/bronze/sme_hybrid/fact_macro_priors.parquet")
 print(f"Saved fact_macro_priors.parquet: {fact_macro.shape}")
+
+# 4. Process DataCo Corporate B2B Invoices + Point-in-Time Macro Join
+print("Processing DataCo Corporate B2B invoices...")
+dataco_raw = pl.read_csv(
+    "data/raw/dataco/DataCoSupplyChainDataset.csv",
+    encoding="latin1",
+    ignore_errors=True,
+)
+
+sme_lookup = dim_sme.select("sme_id", "application_date").sort("sme_id")
+n_smes = len(sme_lookup)
+
+macro_sorted = (
+    fact_macro
+    .with_columns(pl.col("macro_date").str.to_date("%Y-%m-%d", strict=False))
+    .drop_nulls("macro_date")
+    .sort("macro_date")
+)
+
+fact_b2b_invoices = (
+    dataco_raw
+    .filter(pl.col("Customer Segment") == "Corporate")
+    .with_columns(
+        pl.col("Order Id").cast(pl.Utf8).alias("invoice_id"),
+        pl.col("order date (DateOrders)")
+          .str.strptime(pl.Datetime, "%m/%d/%Y %H:%M", strict=False)
+          .cast(pl.Date)
+          .alias("invoice_date"),
+        pl.col("Sales").cast(pl.Float64, strict=False).alias("declared_sales_usd"),
+        pl.col("Order Profit Per Order").cast(pl.Float64, strict=False).alias("net_profit_usd"),
+        pl.col("Late_delivery_risk").cast(pl.Int8, strict=False).alias("late_settlement_flag"),
+    )
+    .drop_nulls(["invoice_id", "invoice_date"])
+    .with_row_index("row_nr")
+    .with_columns((pl.col("row_nr") % n_smes).alias("sme_idx"))
+    .join(sme_lookup.with_row_index("sme_idx"), on="sme_idx", how="inner")
+    # Enforce temporal leakage constraint: strictly pre-application invoices
+    .filter(pl.col("invoice_date") < pl.col("application_date"))
+    .sort("invoice_date")
+    .join_asof(
+        macro_sorted,
+        left_on="invoice_date",
+        right_on="macro_date",
+        strategy="backward",
+    )
+    .select(
+        "invoice_id",
+        "sme_id",
+        "invoice_date",
+        "declared_sales_usd",
+        "net_profit_usd",
+        "late_settlement_flag",
+        "commercial_credit_index",
+        "fed_funds_rate",
+    )
+)
+
+fact_b2b_invoices.write_parquet("data/bronze/sme_hybrid/fact_b2b_invoices.parquet")
+print(f"Saved fact_b2b_invoices.parquet: {fact_b2b_invoices.shape}")
 print("\nBronze layer build complete!")

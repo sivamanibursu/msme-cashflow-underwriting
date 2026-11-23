@@ -4,3 +4,8 @@ data/
 *.json
 __pycache__/
 .venv/
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl

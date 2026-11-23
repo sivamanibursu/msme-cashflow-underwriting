@@ -1,6 +1,6 @@
 # MSME Cash-Flow Underwriting — Setup & Bronze Layer Commands
 
-Complete Windows PowerShell command log from repository initialization through Bronze Parquet table creation.
+Complete Windows PowerShell command log from repository initialization through 4-Dataset Hybrid Bronze Parquet table creation.
 
 ---
 
@@ -17,7 +17,7 @@ git commit -m "Add gitignore"
 git branch -M main
 
 # Link local repo to GitHub and sync initial README.md
-git remote add origin https://github.com
+git remote add origin https://github.com<your-username>/msme-cashflow-underwriting.git
 git pull origin main --allow-unrelated-histories --no-edit
 git push -u origin main
 ```
@@ -26,8 +26,8 @@ git push -u origin main
 
 ## 2. Create Project Folder Structure & Install Python Libraries
 ```powershell
-# Create raw, bronze, and scripts directories
-mkdir data\raw\sba, data\raw\bank_ledger, data\raw\fred, data\bronze\sme_hybrid, scripts
+# Create raw (4 sources), bronze, and scripts directories
+mkdir data\raw\sba, data\raw\bank_ledger, data\raw\fred, data\raw\dataco, data\bronze\sme_hybrid, scripts
 
 # Install core data engineering libraries
 pip install polars pyarrow requests huggingface_hub
@@ -47,20 +47,25 @@ python scripts\download_fred.py
 # Downloaded manually from data.sba.gov and placed at:
 # data\raw\sba\FOIA_7a_FY2020_Present_asof_260930.csv
 
-# Verify all raw files are non-empty
+# 4. DataCo Smart Supply Chain B2B Invoices (CC BY 4.0):
+# Downloaded manually from Mendeley Data (DOI: 10.17632/8gx2fvg2k6.5) and placed at:
+# data\raw\dataco\DataCoSupplyChainDataset.csv
+
+# Verify all raw files across all 4 sources are non-empty
 Get-ChildItem -Recurse data\raw -File | Select-Object Name, Length
 ```
 
 ---
 
-## 4. Inspect Raw Schemas & Build Bronze Parquet Tables
+## 4. Inspect Raw Schemas & Build 4-Dataset Bronze Parquet Tables
 ```powershell
-# Inspect JSON bank statement keys, SBA CSV columns, and macro series
+# Inspect JSON bank statement keys, SBA CSV columns, DataCo schema, and macro series
 python scripts\inspect_raw.py
 
-# Build standardized Bronze layer tables:
+# Build standardized 4-dataset Bronze layer tables (with pre-application temporal leakage filter):
 # - data/bronze/sme_hybrid/dim_sme_applications.parquet
 # - data/bronze/sme_hybrid/fact_bank_ledger.parquet
+# - data/bronze/sme_hybrid/fact_b2b_invoices.parquet
 # - data/bronze/sme_hybrid/fact_macro_priors.parquet
 python scripts\build_hybrid_dataset.py
 
@@ -70,10 +75,10 @@ python scripts\verify_bronze.py
 
 ---
 
-## 5. Save & Push Code Checkpoint to GitHub
+## 5. Save & Push Phase 0 Bronze Checkpoint to GitHub
 ```powershell
 git status
-git add scripts/ SETUP_GUIDE.md
-git commit -m "Add Bronze ETL pipeline scripts and setup documentation"
+git add .gitignore README.md SETUP_GUIDE.md scripts/
+git commit -m "feat(bronze): complete 4-dataset hybrid ingestion with DataCo B2B invoices"
 git push
 ```

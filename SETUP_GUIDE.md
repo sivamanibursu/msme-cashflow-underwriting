@@ -187,4 +187,12 @@ Remove-Item Env:S3_BRONZE_PATH -ErrorAction SilentlyContinue
 
 # 4. Verify updated file sizes and timestamps in S3
 aws s3 ls s3://msme-cashflow-underwriting-bronze-5bd6f33d/sme_hybrid/ --human-readable --summarize
+
+# 5. Check staged files (ensure no data/ or .tfstate files appear)
+git status
+
+# 6. Stage updated scripts and setup guide, then commit and push checkpoint
+git add .
+git commit -m "feat(bronze): scale SBA historical loans, add daily FRED macro series, and stream directly to S3"
+git push
 ```

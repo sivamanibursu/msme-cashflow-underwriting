@@ -4,6 +4,7 @@ tables = [
     "dim_sme_applications.parquet",
     "fact_bank_ledger.parquet",
     "fact_macro_priors.parquet",
+    "fact_b2b_invoices.parquet",
 ]
 
 for table in tables:
@@ -15,4 +16,3 @@ for table in tables:
     print(df.null_count())
     print("Sample 3 rows:")
     print(df.head(3))
-    #print(df.tail(3))

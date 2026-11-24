@@ -3,43 +3,56 @@ import json
 import os
 import polars as pl
 
-os.makedirs("data/bronze/sme_hybrid", exist_ok=True)
+OUTPUT_BASE = os.getenv("S3_BRONZE_PATH", "data/bronze/sme_hybrid").rstrip("/")
+if not OUTPUT_BASE.startswith("s3://"):
+    os.makedirs(OUTPUT_BASE, exist_ok=True)
 
 # 1. Discover bank ledger JSON files first so account mapping matches exact count
 json_files = sorted(glob.glob("data/raw/bank_ledger/train/**/*.json", recursive=True))
 n_accounts = max(len(json_files), 1)
 
-# 2. Process SBA SME Loan Applications (Real Default Outcomes)
-print("Loading SBA SME loan data...")
-sba_raw = pl.read_csv(
-    "data/raw/sba/FOIA_7a_FY2020_Present_asof_260930.csv",
-    ignore_errors=True,
-    truncate_ragged_lines=True,
-)
+# 2. Process ALL SBA SME Loan CSVs (Real Default Outcomes)
+print("Loading SBA SME loan data from all CSVs in data/raw/sba/...")
+sba_files = sorted(glob.glob("data/raw/sba/*.csv"))
+if not sba_files:
+    raise FileNotFoundError("No CSV files found in data/raw/sba/")
 
-# Normalize column names safely in case SBA CSV uses different casing/spacing
-sba_cols = {c.lower().replace("_", "").replace(" ", ""): c for c in sba_raw.columns}
-status_col = sba_cols.get("loanstatus", "LoanStatus")
-gross_col = sba_cols.get("grossapproval", "GrossApproval")
-naics_col = sba_cols.get("naicscode", "NaicsCode")
-state_col = sba_cols.get("projectstate", "ProjectState")
-date_col = sba_cols.get("approvaldate", "ApprovalDate")
+sba_frames = []
+for fpath in sba_files:
+    print(f"  Reading {os.path.basename(fpath)}...")
+    df_part = pl.read_csv(
+        fpath,
+        ignore_errors=True,
+        truncate_ragged_lines=True,
+        infer_schema_length=10000,
+    )
+    col_map = {c.lower().replace("_", "").replace(" ", ""): c for c in df_part.columns}
+    df_norm = df_part.select([
+        pl.col(col_map.get("loanstatus", "LoanStatus")).cast(pl.Utf8).alias("LoanStatus"),
+        pl.col(col_map.get("grossapproval", "GrossApproval")).cast(pl.Utf8).alias("GrossApproval"),
+        pl.col(col_map.get("naicscode", "NaicsCode")).cast(pl.Utf8).alias("NaicsCode"),
+        pl.col(col_map.get("projectstate", "ProjectState")).cast(pl.Utf8).alias("ProjectState"),
+        pl.col(col_map.get("approvaldate", "ApprovalDate")).cast(pl.Utf8).alias("ApprovalDate"),
+    ])
+    sba_frames.append(df_norm)
+
+sba_raw = pl.concat(sba_frames, how="vertical")
 
 dim_sme = (
-    sba_raw.filter(pl.col(status_col).cast(pl.Utf8).str.strip_chars().str.to_uppercase().is_in(["CHGOFF", "PIF"]))
+    sba_raw.filter(pl.col("LoanStatus").str.strip_chars().str.to_uppercase().is_in(["CHGOFF", "PIF"]))
     .with_columns(
         pl.arange(1, pl.len() + 1).alias("sme_num"),
-        pl.when(pl.col(status_col).cast(pl.Utf8).str.strip_chars().str.to_uppercase() == "CHGOFF")
+        pl.when(pl.col("LoanStatus").str.strip_chars().str.to_uppercase() == "CHGOFF")
           .then(1)
           .otherwise(0)
           .alias("default_flag"),
-        pl.col(gross_col).cast(pl.Utf8).str.replace_all(r"[$,]", "").cast(pl.Float64, strict=False).alias("requested_loan_usd"),
-        pl.col(naics_col).cast(pl.Utf8, strict=False).fill_null("UNKNOWN").alias("naics_industry"),
-        pl.col(state_col).cast(pl.Utf8, strict=False).fill_null("NA").alias("region_state"),
+        pl.col("GrossApproval").str.replace_all(r"[$,]", "").cast(pl.Float64, strict=False).alias("requested_loan_usd"),
+        pl.col("NaicsCode").fill_null("UNKNOWN").alias("naics_industry"),
+        pl.col("ProjectState").fill_null("NA").alias("region_state"),
         pl.coalesce([
-            pl.col(date_col).cast(pl.Utf8).str.strip_chars().str.to_date("%Y-%m-%d", strict=False),
-            pl.col(date_col).cast(pl.Utf8).str.strip_chars().str.to_date("%m/%d/%Y", strict=False),
-            pl.col(date_col).cast(pl.Utf8).str.strip_chars().str.to_date("%d-%b-%Y", strict=False),
+            pl.col("ApprovalDate").str.strip_chars().str.to_date("%Y-%m-%d", strict=False),
+            pl.col("ApprovalDate").str.strip_chars().str.to_date("%m/%d/%Y", strict=False),
+            pl.col("ApprovalDate").str.strip_chars().str.to_date("%d-%b-%Y", strict=False),
         ]).alias("application_date"),
     )
     .filter(pl.col("application_date").is_not_null() & (pl.col("requested_loan_usd") > 0))
@@ -58,7 +71,7 @@ dim_sme = (
     )
 )
 
-dim_sme.write_parquet("data/bronze/sme_hybrid/dim_sme_applications.parquet")
+dim_sme.write_parquet(f"{OUTPUT_BASE}/dim_sme_applications.parquet")
 print(f"Saved dim_sme_applications.parquet: {dim_sme.shape}")
 
 # 3. Process Synthetic Bank Ledger JSON Statements (From train/ only)
@@ -108,26 +121,39 @@ for idx, filepath in enumerate(json_files, start=1):
         })
 
 fact_ledger = pl.DataFrame(ledger_rows)
-fact_ledger.write_parquet("data/bronze/sme_hybrid/fact_bank_ledger.parquet")
+fact_ledger.write_parquet(f"{OUTPUT_BASE}/fact_bank_ledger.parquet")
 print(f"Saved fact_bank_ledger.parquet: {fact_ledger.shape}")
 
-# 4. Process Macro Priors
-print("Processing macro economic series...")
-fed = pl.read_csv("data/raw/fred/FEDFUNDS.csv", ignore_errors=True)
-drb = pl.read_csv("data/raw/fred/DRBLACBS.csv", ignore_errors=True)
+# 4. Process Daily Macro Priors
+print("Processing daily macro economic series...")
 
-fed_clean = fed.select(
-    pl.col(fed.columns[0]).alias("macro_date"),
-    pl.col(fed.columns[-1]).cast(pl.Float64, strict=False).alias("fed_funds_rate"),
-).drop_nulls()
+def load_fred_csv(filepath, col_name):
+    df = pl.read_csv(filepath, ignore_errors=True)
+    return df.select(
+        pl.col(df.columns[0]).alias("macro_date"),
+        pl.col(df.columns[-1]).cast(pl.Float64, strict=False).alias(col_name),
+    ).drop_nulls()
 
-drb_clean = drb.select(
-    pl.col(drb.columns[0]).alias("macro_date"),
-    pl.col(drb.columns[-1]).cast(pl.Float64, strict=False).alias("commercial_credit_index"),
-).drop_nulls()
+fed_clean = load_fred_csv("data/raw/fred/FEDFUNDS.csv", "fed_funds_rate")
+drb_clean = load_fred_csv("data/raw/fred/DRBLACBS.csv", "commercial_credit_index")
+dgs_clean = load_fred_csv("data/raw/fred/DGS10.csv", "treasury_10y_rate")
+tbill_clean = load_fred_csv("data/raw/fred/TBILL3M.csv", "tbill_3m_rate")
 
-fact_macro = fed_clean.join(drb_clean, on="macro_date", how="full", coalesce=True).sort("macro_date")
-fact_macro.write_parquet("data/bronze/sme_hybrid/fact_macro_priors.parquet")
+fact_macro = (
+    fed_clean
+    .join(drb_clean, on="macro_date", how="full", coalesce=True)
+    .join(dgs_clean, on="macro_date", how="full", coalesce=True)
+    .join(tbill_clean, on="macro_date", how="full", coalesce=True)
+    .sort("macro_date")
+    .with_columns(
+        pl.col("commercial_credit_index").forward_fill(),
+        pl.col("fed_funds_rate").forward_fill(),
+        pl.col("treasury_10y_rate").forward_fill(),
+        pl.col("tbill_3m_rate").forward_fill(),
+    )
+)
+
+fact_macro.write_parquet(f"{OUTPUT_BASE}/fact_macro_priors.parquet")
 print(f"Saved fact_macro_priors.parquet: {fact_macro.shape}")
 
 # 5. Process DataCo Corporate B2B Invoices + Point-in-Time Macro Join
@@ -138,8 +164,17 @@ dataco_raw = pl.read_csv(
     ignore_errors=True,
 )
 
-sme_lookup = dim_sme.select("sme_id", "application_date").sort("sme_id")
-n_smes = max(len(sme_lookup), 1)
+# Map invoices onto SMEs applying after 2018-02-01 so all ~54k DataCo invoices (2015-2018) are preserved without leakage
+eligible_smes = (
+    dim_sme
+    .filter(pl.col("application_date") > pl.lit("2018-02-01").str.to_date("%Y-%m-%d"))
+    .select("sme_id", "application_date")
+    .sort("sme_id")
+)
+if len(eligible_smes) == 0:
+    eligible_smes = dim_sme.select("sme_id", "application_date").sort("sme_id")
+
+n_eligible = max(len(eligible_smes), 1)
 
 macro_sorted = (
     fact_macro
@@ -163,9 +198,8 @@ fact_b2b_invoices = (
     )
     .drop_nulls(["invoice_id", "invoice_date"])
     .with_row_index("row_nr")
-    .with_columns((pl.col("row_nr") % n_smes).alias("sme_idx"))
-    .join(sme_lookup.with_row_index("sme_idx"), on="sme_idx", how="inner")
-    # Enforce temporal leakage constraint: strictly pre-application invoices
+    .with_columns((pl.col("row_nr") % n_eligible).alias("sme_idx"))
+    .join(eligible_smes.with_row_index("sme_idx"), on="sme_idx", how="inner")
     .filter(pl.col("invoice_date") < pl.col("application_date"))
     .sort("invoice_date")
     .join_asof(
@@ -183,9 +217,11 @@ fact_b2b_invoices = (
         "late_settlement_flag",
         "commercial_credit_index",
         "fed_funds_rate",
+        "treasury_10y_rate",
+        "tbill_3m_rate",
     )
 )
 
-fact_b2b_invoices.write_parquet("data/bronze/sme_hybrid/fact_b2b_invoices.parquet")
+fact_b2b_invoices.write_parquet(f"{OUTPUT_BASE}/fact_b2b_invoices.parquet")
 print(f"Saved fact_b2b_invoices.parquet: {fact_b2b_invoices.shape}")
-print("\nBronze layer build complete!")
+print(f"\nBronze layer build complete at: {OUTPUT_BASE}")

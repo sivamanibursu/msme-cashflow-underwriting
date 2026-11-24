@@ -166,3 +166,25 @@ git add .
 git commit -m "feat(bronze-infra): set region to ap-southeast-2, populate bronze tables, and upload to S3"
 git push
 ```
+---
+
+---
+
+## 9. Expand Bronze Datasets (Historical SBA + Daily FRED) & Write Directly to S3
+```powershell
+# 1. Fetch daily FRED macro series (~26k rows across FEDFUNDS, DGS10, TBILL3M, DRBLACBS)
+python scripts/download_fred.py
+
+# 2. Rebuild Bronze Parquet tables locally and verify row counts & zero-null integrity
+Remove-Item Env:S3_BRONZE_PATH -ErrorAction SilentlyContinue
+python scripts/build_hybrid_dataset.py
+python scripts/verify_bronze.py
+
+# 3. Write updated Bronze Parquet tables directly to AWS S3 via s3fs
+\$env:S3_BRONZE_PATH="s3://msme-cashflow-underwriting-bronze-5bd6f33d/sme_hybrid"
+python scripts/build_hybrid_dataset.py
+Remove-Item Env:S3_BRONZE_PATH -ErrorAction SilentlyContinue
+
+# 4. Verify updated file sizes and timestamps in S3
+aws s3 ls s3://msme-cashflow-underwriting-bronze-5bd6f33d/sme_hybrid/ --human-readable --summarize
+```

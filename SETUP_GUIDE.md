@@ -196,3 +196,26 @@ git add .
 git commit -m "feat(bronze): scale SBA historical loans, add daily FRED macro series, and stream directly to S3"
 git push
 ```
+## 10. Build Silver Layer (Point-in-Time Cleaning & Direct S3 Upload)
+
+```powershell
+# 1. Install AWS SDK for Python (if not already installed)
+pip install boto3
+
+# 2. Run Silver transformation script (cleans Bronze tables, performs as-of macro join, and uploads to S3)
+python scripts/build_silver.py
+
+# 3. Verify Silver Parquet files and total size in AWS S3
+aws s3 ls s3://msme-cashflow-underwriting-silver-5bd6f33d/ --human-readable --summarize
+
+# 4. Verify exact row and column shapes of Silver tables
+python -c "import polars as pl; [print(f, pl.read_parquet(f'data/silver/sme_hybrid/{f}').shape) for f in ['silver_sme_applications.parquet', 'silver_bank_ledger.parquet', 'silver_b2b_invoices.parquet', 'silver_macro_priors.parquet']]"
+
+# 5. Check staged files (ensure no data/ or .tfstate files appear)
+git status
+
+# 6. Stage updated scripts and setup guide, then commit and push checkpoint
+git add .
+git commit -m "feat(silver): build point-in-time silver layer and upload directly to S3"
+git push
+```

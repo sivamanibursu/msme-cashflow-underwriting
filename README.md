@@ -5,7 +5,7 @@
 Traditional banks often reject creditworthy **Micro, Small, and Medium Enterprises (MSMEs)** due to limited physical collateral and thin credit histories. This project implements an end-to-end **Cash-Flow Underwriting Engine** that evaluates borrower default risk using daily bank ledger cash flows, B2B invoice settlement behavior, and macroeconomic interest rate indicators.
 
 ### Key Architectural Highlights
-* **Hybrid Multi-Source Star Schema:** Integrates 4 open-licensed datasets (**8,202** resolved U.S. SBA 7(a) SME loans, **64,698** commercial bank ledger transactions, **54,789** corporate B2B invoices, and **958** FRED macroeconomic observations) into compressed Parquet tables.
+* **Hybrid Multi-Source Star Schema:** Integrates 4 open-licensed datasets (**42,756** resolved U.S. SBA 7(a) SME loans, **64,698** commercial bank ledger transactions, **54,789** corporate B2B invoices, and **26,641** FRED macroeconomic observations) into compressed Parquet tables.
 * **Leakage-Free Temporal Engineering:** Enforces strict pre-application cutoffs (`invoice_date < application_date`) and backward `as-of` macroeconomic joins so models only train on point-in-time data available at underwriting.
 * **AWS S3 Medallion Architecture (IaC):** Automated provisioning of isolated **Bronze, Silver, Gold, and ML Registry** S3 buckets with public-access blocks via **Terraform** (`ap-southeast-2`).
 * **Tech Stack:** Python, Polars, PyArrow, Terraform, AWS S3, Boto3, Scikit-Learn / XGBoost / PyTorch.
